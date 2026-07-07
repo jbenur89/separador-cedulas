@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <!-- CSP: bloquea toda conexión de salida excepto la carga de librerías desde cdnjs.
      Aunque el código fuera alterado, no podría enviar datos a ningún servidor. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline'; worker-src blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; font-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; font-src data:; base-uri 'none'; form-action 'none'">
 <title>Separador de Cédulas — Procesamiento local</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -268,7 +268,9 @@ async function handleFile(file){
           nombre = await ocrBackForName(units[u].back);
         } catch (e){
           console.warn("OCR no disponible:", e);
-          ocrDisponible = false; // no reintentar si el módulo no cargó
+          ocrDisponible = false; // no reintentar: continuar con nombres genéricos
+          try { if (ocrWorker){ ocrWorker.terminate(); } } catch (_){}
+          ocrWorker = null;
         }
       }
       if (nombre){
@@ -288,11 +290,17 @@ async function handleFile(file){
         names[u] = base + "_" + usados[base];
       } else usados[base] = 1;
     }
-    ocrMsg.textContent = ocrFallos === 0
-      ? "Nombres leídos correctamente desde el MRZ de las " + units.length + " cédulas."
-      : "Nombres leídos: " + (units.length - ocrFallos) + " de " + units.length +
-        ". Los restantes usan nombre genérico — puedes editarlos abajo.";
-    ocrMsg.className = "msg " + (ocrFallos === 0 ? "ok" : "warn");
+    if (!ocrDisponible){
+      ocrMsg.textContent = "El módulo OCR no pudo ejecutarse en este navegador. " +
+        "Los archivos usan nombres genéricos; puedes editarlos abajo antes de descargar.";
+      ocrMsg.className = "msg warn";
+    } else {
+      ocrMsg.textContent = ocrFallos === 0
+        ? "Nombres leídos correctamente desde el MRZ de las " + units.length + " cédulas."
+        : "Nombres leídos: " + (units.length - ocrFallos) + " de " + units.length +
+          ". Los restantes usan nombre genérico — puedes editarlos abajo.";
+      ocrMsg.className = "msg " + (ocrFallos === 0 ? "ok" : "warn");
+    }
 
     // 4. Componer un PDF por cédula (frontal arriba, posterior abajo, centradas)
     for (let u = 0; u < units.length; u++){
@@ -528,18 +536,28 @@ function cropToJpeg(canvas, box){
    Todo ocurre en el navegador; solo se descarga (una vez) el modelo de idioma. */
 let ocrWorker = null;
 
+// Envuelve una promesa con un límite de tiempo: si no responde, rechaza.
+// Garantiza que el flujo NUNCA quede colgado esperando al OCR.
+function withTimeout(promise, ms, etiqueta){
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error("Timeout: " + etiqueta)), ms))
+  ]);
+}
+
 async function getOcrWorker(){
   if (ocrWorker) return ocrWorker;
   if (typeof Tesseract === "undefined") throw new Error("Tesseract no disponible");
-  ocrWorker = await Tesseract.createWorker("eng", 1, {
+  const w = await withTimeout(Tesseract.createWorker("eng", 1, {
     workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
     corePath:   "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1",
     langPath:   "https://tessdata.projectnaptha.com/4.0.0"
-  });
-  await ocrWorker.setParameters({
+  }), 40000, "inicialización del OCR");
+  await withTimeout(w.setParameters({
     tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
     tessedit_pageseg_mode: "6"
-  });
+  }), 10000, "configuración del OCR");
+  ocrWorker = w;
   return ocrWorker;
 }
 
@@ -569,7 +587,7 @@ async function ocrBackForName(backDataUrl){
   cv.width = img.width; cv.height = img.height - yStart;
   cv.getContext("2d").drawImage(img, 0, yStart, img.width, cv.height, 0, 0, img.width, cv.height);
   const worker = await getOcrWorker();
-  const { data } = await worker.recognize(cv);
+  const { data } = await withTimeout(worker.recognize(cv), 25000, "lectura OCR de una cédula");
   cv.width = cv.height = 0;
   return parseNameFromMrz(data.text || "");
 }
