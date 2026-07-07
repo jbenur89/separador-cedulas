@@ -369,11 +369,56 @@ function detectCards(canvas){
 }
 
 function cropToJpeg(canvas, box){
+  // 1. Recortar la región detectada
   const c = document.createElement("canvas");
   c.width = Math.round(box.w); c.height = Math.round(box.h);
   c.getContext("2d").drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, c.width, c.height);
-  const url = c.toDataURL("image/jpeg", 0.92);
-  c.width = c.height = 0;
+
+  // 2. Autocrop: recortar bordes oscuros del escáner (líneas negras laterales)
+  //    Busca desde cada borde hacia adentro hasta encontrar una columna/fila
+  //    que tenga al menos 60% de píxeles claros (> 180 en promedio RGB).
+  const ctx2 = c.getContext("2d", { willReadFrequently: true });
+  const id = ctx2.getImageData(0, 0, c.width, c.height);
+  const px = id.data, W = c.width, H = c.height;
+
+  function colBrightness(x){
+    let sum = 0;
+    for (let y = 0; y < H; y++){
+      const i = (y * W + x) * 4;
+      sum += (px[i] + px[i+1] + px[i+2]) / 3;
+    }
+    return sum / H;
+  }
+  function rowBrightness(y){
+    let sum = 0;
+    for (let x = 0; x < W; x++){
+      const i = (y * W + x) * 4;
+      sum += (px[i] + px[i+1] + px[i+2]) / 3;
+    }
+    return sum / W;
+  }
+
+  const THRESH = 160; // columna/fila considerada "oscura" si promedio < este valor
+  const MAX_TRIM = 0.12; // no recortar más del 12% del ancho/alto
+
+  let x0 = 0, x1 = W - 1, y0 = 0, y1 = H - 1;
+  while (x0 < W * MAX_TRIM && colBrightness(x0) < THRESH) x0++;
+  while (x1 > W * (1 - MAX_TRIM) && colBrightness(x1) < THRESH) x1--;
+  while (y0 < H * MAX_TRIM && rowBrightness(y0) < THRESH) y0++;
+  while (y1 > H * (1 - MAX_TRIM) && rowBrightness(y1) < THRESH) y1--;
+
+  // 3. Si se recortó algo, redibujar en canvas final
+  const fw = x1 - x0 + 1, fh = y1 - y0 + 1;
+  let finalCanvas = c;
+  if (x0 > 0 || y0 > 0 || fw < W || fh < H){
+    finalCanvas = document.createElement("canvas");
+    finalCanvas.width = fw; finalCanvas.height = fh;
+    finalCanvas.getContext("2d").drawImage(c, x0, y0, fw, fh, 0, 0, fw, fh);
+    c.width = c.height = 0;
+  }
+
+  const url = finalCanvas.toDataURL("image/jpeg", 0.92);
+  finalCanvas.width = finalCanvas.height = 0;
   return url;
 }
 
