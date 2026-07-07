@@ -262,105 +262,153 @@ async function handleFile(file){
   }
 }
 
-/* ---------- Detección de tarjetas (adaptativa) ----------
-   Funciona con 1 a N cédulas por página en cualquier disposición.
-   No usa umbrales de tamaño absoluto: calcula el área mínima
-   como fracción del área real de la página. */
+/* ---------- Detección de tarjetas (cortes por proyección, 3 fases) ----------
+   Algoritmo validado contra documentos reales de la OTEC:
+   Fase 1: la página se divide en bandas de fila usando el perfil horizontal.
+   Fase 2: cada banda se divide en columnas usando el perfil vertical.
+   Fase 3: cada celda intenta un re-corte vertical, aceptado SOLO si todos
+   los fragmentos tienen altura plausible de cédula ID-1 (0.45–0.85 × ancho),
+   lo que distingue canales reales de huecos internos de la tarjeta.
+   La máscara de contenido usa brillo (<245) O croma (>12) para que los
+   fondos rosa/celeste de las cédulas cuenten como contenido sólido. */
 function detectCards(canvas){
-  const WORK_W = 600, CELL = 3;
-  const ratio = WORK_W / canvas.width;
-  const WORK_H = Math.max(1, Math.round(canvas.height * ratio));
+  const DET_W = 850;
+  const ratio = DET_W / canvas.width;
+  const DET_H = Math.max(1, Math.round(canvas.height * ratio));
 
   const sc = document.createElement("canvas");
-  sc.width = WORK_W; sc.height = WORK_H;
+  sc.width = DET_W; sc.height = DET_H;
   const sctx = sc.getContext("2d", { willReadFrequently: true });
-  sctx.drawImage(canvas, 0, 0, WORK_W, WORK_H);
-  const d = sctx.getImageData(0, 0, WORK_W, WORK_H).data;
+  sctx.drawImage(canvas, 0, 0, DET_W, DET_H);
+  const d = sctx.getImageData(0, 0, DET_W, DET_H).data;
   sc.width = sc.height = 0;
 
-  // Grilla: marcar celda como "contenido" si promedio RGB < 220
-  const gw = Math.ceil(WORK_W / CELL), gh = Math.ceil(WORK_H / CELL);
-  const grid = new Uint8Array(gw * gh);
-  for (let y = 0; y < WORK_H; y++){
-    for (let x = 0; x < WORK_W; x++){
-      const i = (y * WORK_W + x) * 4;
-      if ((d[i] + d[i+1] + d[i+2]) / 3 < 220){
-        grid[((y / CELL) | 0) * gw + ((x / CELL) | 0)] = 1;
-      }
+  // Máscara de contenido (1 bit por píxel)
+  const mask = new Uint8Array(DET_W * DET_H);
+  for (let y = 0; y < DET_H; y++){
+    for (let x = 0; x < DET_W; x++){
+      const i = (y * DET_W + x) * 4;
+      const r = d[i], g = d[i+1], b = d[i+2];
+      const avg = (r + g + b) / 3;
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      if (avg < 245 || chroma > 12) mask[y * DET_W + x] = 1;
     }
   }
 
-  // Componentes conexas (8 vecinos)
-  const seen = new Uint8Array(gw * gh);
-  let comps = [];
-  for (let cy = 0; cy < gh; cy++){
-    for (let cx = 0; cx < gw; cx++){
-      const start = cy * gw + cx;
-      if (!grid[start] || seen[start]) continue;
-      let minX = cx, maxX = cx, minY = cy, maxY = cy, count = 0;
-      const stack = [start]; seen[start] = 1;
-      while (stack.length){
-        const c = stack.pop(); count++;
-        const x = c % gw, y = (c - x) / gw;
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (y < minY) minY = y; if (y > maxY) maxY = y;
-        for (let dy = -1; dy <= 1; dy++){
-          for (let dx = -1; dx <= 1; dx++){
-            const nx = x + dx, ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
-            const ni = ny * gw + nx;
-            if (grid[ni] && !seen[ni]){ seen[ni] = 1; stack.push(ni); }
-          }
+  // Perfil de filas dentro de un rectángulo
+  function rowProfile(y0, y1, x0, x1){
+    const p = new Int32Array(y1 - y0);
+    for (let y = y0; y < y1; y++){
+      let s = 0;
+      const base = y * DET_W;
+      for (let x = x0; x < x1; x++) s += mask[base + x];
+      p[y - y0] = s;
+    }
+    return p;
+  }
+  // Perfil de columnas dentro de un rectángulo
+  function colProfile(y0, y1, x0, x1){
+    const p = new Int32Array(x1 - x0);
+    for (let x = x0; x < x1; x++){
+      let s = 0;
+      for (let y = y0; y < y1; y++) s += mask[y * DET_W + x];
+      p[x - x0] = s;
+    }
+    return p;
+  }
+
+  // Divide un perfil en segmentos separados por canales vacíos
+  function segments(profile, emptyTol, minGutter, minSeg){
+    const n = profile.length;
+    const segs = [];
+    let start = null, i = 0;
+    while (i < n){
+      if (profile[i] > emptyTol){
+        if (start === null) start = i;
+        i++;
+      } else {
+        let j = i;
+        while (j < n && profile[j] <= emptyTol) j++;
+        if (start !== null && ((j - i) >= minGutter || j === n)){
+          segs.push([start, i]); start = null;
         }
+        i = j;
       }
-      if (count >= 8) comps.push({ minX, minY, maxX, maxY });
+    }
+    if (start !== null) segs.push([start, n]);
+    return segs.filter(s => (s[1] - s[0]) >= minSeg);
+  }
+
+  const G_Y = Math.max(4, Math.round(DET_H * 0.008));
+  const G_X = Math.max(4, Math.round(DET_W * 0.010));
+
+  // FASE 1: bandas de fila sobre toda la página
+  const bands = segments(rowProfile(0, DET_H, 0, DET_W),
+                         Math.max(2, DET_W * 0.005), G_Y, Math.round(DET_H * 0.03));
+
+  // FASE 2: columnas dentro de cada banda
+  const cells = [];
+  for (const [y0, y1] of bands){
+    const cols = segments(colProfile(y0, y1, 0, DET_W),
+                          Math.max(2, (y1 - y0) * 0.005), G_X, Math.round(DET_W * 0.08));
+    for (const [x0, x1] of cols) cells.push([y0, y1, x0, x1]);
+  }
+
+  // FASE 3: re-corte vertical con validación geométrica de cédula
+  const finalCells = [];
+  for (const [y0, y1, x0, x1] of cells){
+    const cw = x1 - x0;
+    const subs = segments(rowProfile(y0, y1, x0, x1),
+                          Math.max(1, cw * 0.004),
+                          Math.max(3, Math.round(DET_H * 0.006)), 5);
+    const plausible = subs.length > 1 &&
+      subs.every(([a, b]) => (b - a) >= 0.45 * cw && (b - a) <= 0.85 * cw);
+    if (plausible){
+      for (const [a, b] of subs) finalCells.push([y0 + a, y0 + b, x0, x1]);
+    } else {
+      finalCells.push([y0, y1, x0, x1]);
     }
   }
 
-  // Fusionar cajas cercanas — GAP adaptativo al 3% del ancho
-  const GAP = Math.max(3, Math.round(gw * 0.03));
-  let merged = true;
-  while (merged){
-    merged = false;
-    outer:
-    for (let a = 0; a < comps.length; a++){
-      for (let b = a + 1; b < comps.length; b++){
-        const A = comps[a], B = comps[b];
-        if (A.minX - GAP <= B.maxX && B.minX - GAP <= A.maxX &&
-            A.minY - GAP <= B.maxY && B.minY - GAP <= A.maxY){
-          A.minX = Math.min(A.minX, B.minX); A.maxX = Math.max(A.maxX, B.maxX);
-          A.minY = Math.min(A.minY, B.minY); A.maxY = Math.max(A.maxY, B.maxY);
-          comps.splice(b, 1); merged = true; break outer;
-        }
-      }
-    }
-  }
-
-  // Filtro adaptativo: mínimo 1% del área de la página, proporción entre 0.8 y 4.0
-  const pageArea = gw * gh;
+  // Caja ajustada al contenido real + filtros de ruido y proporción
   const boxes = [];
-  for (const c of comps){
-    const cw = c.maxX - c.minX + 1, ch = c.maxY - c.minY + 1;
-    if (cw * ch < pageArea * 0.01) continue;
-    if (cw < 5 || ch < 5) continue;
-    const aspect = cw / ch;
-    if (aspect < 0.8 || aspect > 4.0) continue;
-    boxes.push({ x: c.minX * CELL, y: c.minY * CELL, w: cw * CELL, h: ch * CELL });
+  for (const [y0, y1, x0, x1] of finalCells){
+    let by0 = -1, by1 = -1, bx0 = DET_W, bx1 = -1, total = 0;
+    for (let y = y0; y < y1; y++){
+      const base = y * DET_W;
+      for (let x = x0; x < x1; x++){
+        if (mask[base + x]){
+          if (by0 === -1) by0 = y;
+          by1 = y; total++;
+          if (x < bx0) bx0 = x;
+          if (x > bx1) bx1 = x;
+        }
+      }
+    }
+    if (by0 === -1) continue;
+    const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+    if (bw * bh < 0.003 * DET_W * DET_H) continue;
+    if (bw < 0.08 * DET_W || bh < 0.04 * DET_H) continue;
+    const aspect = bw / bh;
+    if (aspect < 1.15 || aspect > 2.2) continue;
+    if (total / (bw * bh) < 0.25) continue;
+    boxes.push({ x: bx0, y: by0, w: bw, h: bh });
   }
 
-  // Ordenar: arriba→abajo, izquierda→derecha dentro de cada fila
+  // Orden de lectura: filas de arriba hacia abajo, izquierda a derecha
   boxes.sort((p, q) => p.y - q.y);
   const rows = [];
   for (const b of boxes){
-    const r = rows.find(row => Math.abs(row[0].y - b.y) < b.h * 0.6);
+    const cy = b.y + b.h / 2;
+    const r = rows.find(row => Math.abs((row[0].y + row[0].h / 2) - cy) < b.h * 0.5);
     if (r) r.push(b); else rows.push([b]);
   }
   const ordered = [];
   for (const r of rows){ r.sort((p, q) => p.x - q.x); ordered.push(...r); }
 
-  // Escalar a resolución completa con margen del 1%
+  // Escalar a resolución completa con margen del 0.5%
   return ordered.map(b => {
-    const mx = b.w * 0.01 / ratio, my = b.h * 0.01 / ratio;
+    const mx = b.w * 0.005 / ratio, my = b.h * 0.005 / ratio;
     return {
       x: Math.max(0, b.x / ratio - mx),
       y: Math.max(0, b.y / ratio - my),
