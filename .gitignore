@@ -1,0 +1,13 @@
+# NUNCA subir documentos con datos personales al repositorio
+*.pdf
+*.PDF
+*.zip
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+
+# Sistema
+.DS_Store
+Thumbs.db

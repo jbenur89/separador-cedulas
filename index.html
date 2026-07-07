@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<!-- CSP: bloquea toda conexión de salida excepto la carga de librerías desde cdnjs.
+     Aunque el código fuera alterado, no podría enviar datos a ningún servidor. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://cdnjs.cloudflare.com 'unsafe-inline'; worker-src blob: https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://cdnjs.cloudflare.com; font-src data:; base-uri 'none'; form-action 'none'">
+<title>Separador de Cédulas — Procesamiento local</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --ink:#17242e; --ink-soft:#51616e; --line:#d8dee3;
+    --bg:#f2f4f5; --surface:#ffffff;
+    --accent:#12525c; --accent-soft:#e3eef0;
+    --ok:#1b6b3a; --warn:#8a5a00; --err:#9a2323;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+  }
+  header{
+    background:var(--surface); border-bottom:1px solid var(--line);
+    padding:1.1rem 1.5rem; display:flex; align-items:baseline; gap:.8rem; flex-wrap:wrap;
+  }
+  header h1{font-size:1.05rem; font-weight:650; letter-spacing:.01em;}
+  header .tag{
+    font-family:var(--mono); font-size:.72rem; color:var(--accent);
+    background:var(--accent-soft); border:1px solid var(--accent);
+    padding:.15rem .5rem; border-radius:3px;
+  }
+  main{max-width:880px; margin:0 auto; padding:1.6rem 1.2rem 4rem;}
+
+  .privacy{
+    border:1px solid var(--line); border-left:4px solid var(--accent);
+    background:var(--surface); border-radius:6px;
+    padding:.9rem 1.1rem; margin-bottom:1.4rem; font-size:.88rem; color:var(--ink-soft);
+  }
+  .privacy strong{color:var(--ink);}
+
+  /* Zona de carga: marcas de esquina, como cama de escáner */
+  .drop{
+    position:relative; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; padding:3rem 1.5rem; text-align:center; cursor:pointer;
+    transition:background .15s;
+  }
+  .drop::before,.drop::after,
+  .drop .c3,.drop .c4{
+    content:""; position:absolute; width:22px; height:22px;
+    border:2px solid var(--accent);
+  }
+  .drop::before{top:12px; left:12px; border-right:none; border-bottom:none;}
+  .drop::after{top:12px; right:12px; border-left:none; border-bottom:none;}
+  .drop .c3{bottom:12px; left:12px; border-right:none; border-top:none;}
+  .drop .c4{bottom:12px; right:12px; border-left:none; border-top:none;}
+  .drop.hover{background:var(--accent-soft);}
+  .drop p.big{font-size:1rem; font-weight:600; margin-bottom:.3rem;}
+  .drop p.small{font-size:.83rem; color:var(--ink-soft);}
+  .drop input{display:none;}
+
+  #status{margin:1.2rem 0; font-size:.9rem;}
+  .msg{padding:.6rem .9rem; border-radius:5px; margin-bottom:.5rem; border:1px solid var(--line); background:var(--surface);}
+  .msg.ok{border-left:4px solid var(--ok);}
+  .msg.warn{border-left:4px solid var(--warn);}
+  .msg.err{border-left:4px solid var(--err);}
+  .msg code{font-family:var(--mono); font-size:.82rem;}
+
+  progress{width:100%; height:8px; accent-color:var(--accent); margin-top:.4rem;}
+
+  #results{display:none;}
+  .toolbar{
+    display:flex; align-items:center; justify-content:space-between;
+    gap:1rem; flex-wrap:wrap; margin:1.4rem 0 .9rem;
+  }
+  .toolbar h2{font-size:.95rem; font-weight:650;}
+  .cards{display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:1rem;}
+  .card{
+    background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:.9rem; display:flex; flex-direction:column; gap:.6rem;
+  }
+  .card .thumbs{display:flex; flex-direction:column; gap:.45rem; background:var(--bg); border-radius:5px; padding:.5rem;}
+  .card img{width:100%; border-radius:3px; border:1px solid var(--line); display:block;}
+  .card label{font-size:.72rem; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.05em;}
+  .card input[type=text]{
+    font-family:var(--mono); font-size:.83rem; padding:.4rem .5rem;
+    border:1px solid var(--line); border-radius:4px; width:100%; color:var(--ink);
+  }
+  .card input[type=text]:focus{outline:2px solid var(--accent); outline-offset:1px;}
+
+  button{
+    font:inherit; font-size:.86rem; font-weight:600; cursor:pointer;
+    border-radius:5px; padding:.5rem .95rem; border:1px solid var(--accent);
+    background:var(--surface); color:var(--accent);
+  }
+  button.primary{background:var(--accent); color:#fff;}
+  button:hover{filter:brightness(1.08);}
+  button:focus-visible{outline:2px solid var(--ink); outline-offset:2px;}
+  button:disabled{opacity:.45; cursor:default;}
+
+  footer{
+    max-width:880px; margin:0 auto; padding:0 1.2rem 2rem;
+    font-size:.78rem; color:var(--ink-soft);
+  }
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Separador de Cédulas de Identidad</h1>
+  <span class="tag">PROCESAMIENTO 100% LOCAL</span>
+</header>
+
+<main>
+  <div class="privacy">
+    <strong>Privacidad:</strong> este documento se procesa completamente en tu navegador.
+    Ningún dato sale de este dispositivo: no hay servidor, no hay almacenamiento, no hay
+    conexiones de red durante el procesamiento. Al cerrar la pestaña, todo se descarta.
+  </div>
+
+  <div class="drop" id="drop" role="button" tabindex="0" aria-label="Cargar PDF con escaneos de cédulas">
+    <span class="c3"></span><span class="c4"></span>
+    <p class="big">Arrastra aquí el PDF con los escaneos, o haz clic para seleccionarlo</p>
+    <p class="small">Formato esperado: páginas alternadas — impares con caras frontales, pares con caras posteriores, en el mismo orden.</p>
+    <input type="file" id="fileInput" accept="application/pdf">
+  </div>
+
+  <div id="status"></div>
+
+  <section id="results">
+    <div class="toolbar">
+      <h2 id="resultTitle"></h2>
+      <button class="primary" id="zipBtn">Descargar todo (ZIP)</button>
+    </div>
+    <div class="cards" id="cardsGrid"></div>
+  </section>
+</main>
+
+<footer>
+  Herramienta de uso interno para OTEC. Los archivos generados contienen datos personales:
+  guárdalos únicamente en medios autorizados y elimínalos cuando dejen de ser necesarios
+  (Ley 19.628 / Ley 21.719).
+</footer>
+
+<script>
+"use strict";
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const $ = id => document.getElementById(id);
+const drop = $("drop"), fileInput = $("fileInput"),
+      statusBox = $("status"), results = $("results"),
+      cardsGrid = $("cardsGrid"), zipBtn = $("zipBtn"), resultTitle = $("resultTitle");
+
+let generated = []; // {name, bytes}
+
+/* ---------- UI: carga de archivo ---------- */
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") fileInput.click(); });
+["dragover","dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover"); }));
+drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+fileInput.addEventListener("change", () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+function msg(text, kind){ 
+  const d = document.createElement("div");
+  d.className = "msg " + (kind || "");
+  d.innerHTML = text;
+  statusBox.appendChild(d);
+}
+function clearStatus(){ statusBox.innerHTML = ""; results.style.display = "none"; cardsGrid.innerHTML = ""; generated = []; }
+
+/* ---------- Pipeline principal ---------- */
+async function handleFile(file){
+  clearStatus();
+  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")){
+    msg("El archivo debe ser un PDF.", "err"); return;
+  }
+  const prog = document.createElement("progress");
+  prog.max = 100; prog.value = 5;
+  msg("Procesando <code>" + escapeHtml(file.name) + "</code> localmente…");
+  statusBox.appendChild(prog);
+
+  try {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const n = pdf.numPages;
+
+    if (n < 2){ msg("El PDF tiene una sola página; se necesitan al menos 2 (frontal + posterior).", "err"); return; }
+    if (n % 2 !== 0){
+      msg("Advertencia: el PDF tiene " + n + " páginas (número impar). Se esperaba alternancia frontal/posterior. La última página se ignorará.", "warn");
+    }
+
+    // 1. Renderizar y detectar tarjetas en cada página
+    const pages = []; // [{cards:[dataUrl,...]}]
+    for (let i = 1; i <= n; i++){
+      const page = await pdf.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const scale = 1700 / base.width;               // resolución de trabajo
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(vp.width);
+      canvas.height = Math.round(vp.height);
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+      const boxes = detectCards(canvas);
+      const crops = boxes.map(b => cropToJpeg(canvas, b));
+      pages.push({ index: i, crops, boxes });
+
+      // liberar memoria del render
+      canvas.width = canvas.height = 0;
+      prog.value = 5 + Math.round(70 * i / n);
+    }
+
+    // 2. Emparejar: página impar (frontal) con la par siguiente (posterior)
+    const pairsCount = Math.floor(n / 2);
+    let totalCards = 0, warnings = 0;
+    const units = []; // {front, back}
+    for (let p = 0; p < pairsCount; p++){
+      const fr = pages[2*p], bk = pages[2*p + 1];
+      if (fr.crops.length === 0 && bk.crops.length === 0) continue;
+      if (fr.crops.length !== bk.crops.length){
+        warnings++;
+        msg("Páginas " + fr.index + "–" + bk.index + ": se detectaron " + fr.crops.length +
+            " cédulas frontales pero " + bk.crops.length + " posteriores. Se emparejan por orden; revisa el resultado.", "warn");
+      }
+      const k = Math.min(fr.crops.length, bk.crops.length);
+      for (let j = 0; j < k; j++){
+        units.push({ front: fr.crops[j], back: bk.crops[j] });
+        totalCards++;
+      }
+    }
+
+    if (totalCards === 0){
+      msg("No se detectaron cédulas. Verifica que el escaneo tenga fondo blanco y las tarjetas sean visibles con buen contraste.", "err");
+      return;
+    }
+    prog.value = 80;
+
+    // 3. Componer un PDF por cédula (frontal arriba, posterior abajo, centradas)
+    for (let u = 0; u < units.length; u++){
+      const bytes = await composePdf(units[u].front, units[u].back);
+      generated.push({ name: "cedula_" + String(u + 1).padStart(2, "0"), bytes });
+      prog.value = 80 + Math.round(18 * (u + 1) / units.length);
+    }
+
+    prog.value = 100;
+    msg("Listo: " + totalCards + " cédula(s) detectada(s) y " + generated.length + " PDF(s) generado(s)." +
+        (warnings ? " Revisa las advertencias." : ""), warnings ? "warn" : "ok");
+    renderResults(units);
+  } catch (err){
+    console.error(err);
+    msg("Error al procesar el PDF: " + escapeHtml(err.message || String(err)), "err");
+  } finally {
+    fileInput.value = ""; // no retener referencia al archivo
+  }
+}
+
+/* ---------- Detección de tarjetas ----------
+   Estrategia: reducir la página, marcar celdas con contenido (no blancas),
+   agrupar por componentes conexas, fusionar cajas cercanas y filtrar por
+   tamaño y proporción de tarjeta ID-1 (~1.586 : 1). */
+function detectCards(canvas){
+  const SMALL_W = 320, CELL = 4;
+  const ratio = SMALL_W / canvas.width;
+  const smallH = Math.max(1, Math.round(canvas.height * ratio));
+  const sc = document.createElement("canvas");
+  sc.width = SMALL_W; sc.height = smallH;
+  const sctx = sc.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(canvas, 0, 0, SMALL_W, smallH);
+  const d = sctx.getImageData(0, 0, SMALL_W, smallH).data;
+
+  const gw = Math.ceil(SMALL_W / CELL), gh = Math.ceil(smallH / CELL);
+  const grid = new Uint8Array(gw * gh);
+  for (let y = 0; y < smallH; y++){
+    const row = y * SMALL_W;
+    for (let x = 0; x < SMALL_W; x++){
+      const i = (row + x) * 4;
+      // "contenido" = píxel que se aleja del blanco del papel
+      if (!(d[i] > 228 && d[i+1] > 228 && d[i+2] > 228)){
+        grid[((y / CELL) | 0) * gw + ((x / CELL) | 0)] = 1;
+      }
+    }
+  }
+
+  // Componentes conexas (8 vecinos) sobre la grilla de celdas
+  const seen = new Uint8Array(gw * gh);
+  let comps = [];
+  for (let cy = 0; cy < gh; cy++){
+    for (let cx = 0; cx < gw; cx++){
+      const start = cy * gw + cx;
+      if (!grid[start] || seen[start]) continue;
+      let minX = cx, maxX = cx, minY = cy, maxY = cy, count = 0;
+      const stack = [start]; seen[start] = 1;
+      while (stack.length){
+        const c = stack.pop(); count++;
+        const x = c % gw, y = (c - x) / gw;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        for (let dy = -1; dy <= 1; dy++){
+          for (let dx = -1; dx <= 1; dx++){
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+            const ni = ny * gw + nx;
+            if (grid[ni] && !seen[ni]){ seen[ni] = 1; stack.push(ni); }
+          }
+        }
+      }
+      if (count >= 3) comps.push({ minX, minY, maxX, maxY }); // descartar polvo del escaneo
+    }
+  }
+
+  // Fusionar cajas cercanas (partes de una misma tarjeta con fondo claro)
+  const GAP = 4; // celdas ≈ 16 px en escala reducida
+  let merged = true;
+  while (merged){
+    merged = false;
+    outer:
+    for (let a = 0; a < comps.length; a++){
+      for (let b = a + 1; b < comps.length; b++){
+        const A = comps[a], B = comps[b];
+        if (A.minX - GAP <= B.maxX && B.minX - GAP <= A.maxX &&
+            A.minY - GAP <= B.maxY && B.minY - GAP <= A.maxY){
+          A.minX = Math.min(A.minX, B.minX); A.maxX = Math.max(A.maxX, B.maxX);
+          A.minY = Math.min(A.minY, B.minY); A.maxY = Math.max(A.maxY, B.maxY);
+          comps.splice(b, 1); merged = true; break outer;
+        }
+      }
+    }
+  }
+
+  // Filtrar por tamaño y proporción de tarjeta
+  const boxes = [];
+  for (const c of comps){
+    const w = (c.maxX - c.minX + 1) * CELL, h = (c.maxY - c.minY + 1) * CELL;
+    const aspect = w / h;
+    if (w < 0.18 * SMALL_W) continue;                 // demasiado pequeña
+    if (w * h < 0.015 * SMALL_W * smallH) continue;   // área insignificante
+    if (aspect < 1.05 || aspect > 2.6) continue;      // no tiene forma de tarjeta
+    boxes.push({ x: c.minX * CELL, y: c.minY * CELL, w, h });
+  }
+
+  // Orden de lectura: filas de arriba hacia abajo, dentro de la fila de izquierda a derecha
+  boxes.sort((p, q) => p.y - q.y);
+  const rows = [];
+  for (const b of boxes){
+    const r = rows.find(row => Math.abs(row[0].y - b.y) < b.h * 0.5);
+    if (r) r.push(b); else rows.push([b]);
+  }
+  const ordered = [];
+  for (const r of rows){ r.sort((p, q) => p.x - q.x); ordered.push(...r); }
+
+  // Escalar a resolución completa con un margen del 1.5%
+  return ordered.map(b => {
+    const m = b.w * 0.015 / ratio;
+    return {
+      x: Math.max(0, b.x / ratio - m),
+      y: Math.max(0, b.y / ratio - m),
+      w: Math.min(canvas.width,  b.w / ratio + 2 * m),
+      h: Math.min(canvas.height, b.h / ratio + 2 * m)
+    };
+  });
+}
+
+function cropToJpeg(canvas, box){
+  const c = document.createElement("canvas");
+  c.width = Math.round(box.w); c.height = Math.round(box.h);
+  c.getContext("2d").drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, c.width, c.height);
+  const url = c.toDataURL("image/jpeg", 0.92);
+  c.width = c.height = 0;
+  return url;
+}
+
+/* ---------- Composición del PDF de salida ---------- */
+async function composePdf(frontUrl, backUrl){
+  const doc = await PDFLib.PDFDocument.create();
+  doc.setProducer("Separador de Cédulas (procesamiento local)");
+  const page = doc.addPage([612, 792]); // Carta, vertical
+  const front = await doc.embedJpg(frontUrl);
+  const back  = await doc.embedJpg(backUrl);
+
+  const targetW = 396;                  // ancho de tarjeta en puntos (~14 cm)
+  const fs = front.scale(targetW / front.width);
+  const bs = back.scale(targetW / back.width);
+  const gap = 40;
+  const totalH = fs.height + gap + bs.height;
+  const top = (792 + totalH) / 2;
+
+  page.drawImage(front, { x: (612 - fs.width) / 2, y: top - fs.height, width: fs.width, height: fs.height });
+  page.drawImage(back,  { x: (612 - bs.width) / 2, y: top - fs.height - gap - bs.height, width: bs.width, height: bs.height });
+  return await doc.save();
+}
+
+/* ---------- Resultados y descargas ---------- */
+function renderResults(units){
+  results.style.display = "block";
+  resultTitle.textContent = "Resultados (" + generated.length + ")";
+  cardsGrid.innerHTML = "";
+  generated.forEach((g, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const thumbs = document.createElement("div");
+    thumbs.className = "thumbs";
+    const imF = document.createElement("img"); imF.src = units[i].front; imF.alt = "Cara frontal " + (i+1);
+    const imB = document.createElement("img"); imB.src = units[i].back;  imB.alt = "Cara posterior " + (i+1);
+    thumbs.append(imF, imB);
+
+    const lab = document.createElement("label");
+    lab.textContent = "Nombre del archivo";
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.value = g.name;
+    inp.addEventListener("input", () => { g.name = sanitizeName(inp.value) || ("cedula_" + (i+1)); });
+
+    const btn = document.createElement("button");
+    btn.textContent = "Descargar PDF";
+    btn.addEventListener("click", () => downloadBlob(g.bytes, g.name + ".pdf"));
+
+    card.append(thumbs, lab, inp, btn);
+    cardsGrid.appendChild(card);
+  });
+}
+
+zipBtn.addEventListener("click", async () => {
+  if (!generated.length) return;
+  zipBtn.disabled = true;
+  try {
+    const zip = new JSZip();
+    generated.forEach(g => zip.file(sanitizeName(g.name) + ".pdf", g.bytes));
+    const blob = await zip.generateAsync({ type: "blob" });
+    downloadBlob(blob, "cedulas_separadas.zip");
+  } finally {
+    zipBtn.disabled = false;
+  }
+});
+
+function downloadBlob(data, filename){
+  const blob = data instanceof Blob ? data : new Blob([data], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function sanitizeName(s){ return s.replace(/[^\w\-\.áéíóúñÁÉÍÓÚÑ ]/g, "").trim(); }
+function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+</script>
+</body>
+</html>
