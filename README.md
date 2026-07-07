@@ -47,14 +47,24 @@ PDF individual por cada cédula, con ambas caras centradas en una sola página t
 - Las cédulas deben mantener el mismo orden entre la página frontal y su página posterior.
 - Fondo blanco de escáner con buen contraste. Soporta varias cédulas por página.
 
+## Nombrado automático (OCR local)
+
+La app lee la zona MRZ del reverso de cada cédula con Tesseract.js (100% en el
+navegador) y nombra cada PDF como `Cédula_Apellido_Nombre`. Si el OCR no logra
+leer un reverso, ese archivo usa el nombre genérico `cedula_NN` y puede editarse
+manualmente antes de descargar. El nombre del ZIP también es editable.
+
+Nota de privacidad: la imagen nunca sale del dispositivo. En el primer uso se
+descarga una única vez el modelo genérico de idioma (~2 MB) desde un CDN; ese
+modelo no contiene ni recibe ningún dato personal.
+
 ## Endurecimiento opcional (recomendado a futuro)
 
-- **Vendorizar las librerías**: descargar `pdf.min.js`, `pdf.worker.min.js`, `pdf-lib.min.js`
-  y `jszip.min.js` a una carpeta `/vendor` del repositorio y actualizar las rutas en
-  `index.html`. Con eso la app funciona incluso sin internet (basta abrir `index.html`
-  localmente) y se elimina la dependencia del CDN.
-- **Nombrado automático por RUN**: agregar OCR local (Tesseract.js) sobre la zona MRZ
-  del reverso para nombrar cada PDF con el RUN del alumno. También 100% en el navegador.
+- **Vendorizar las librerías**: descargar las librerías (`pdf.min.js`,
+  `pdf.worker.min.js`, `pdf-lib.min.js`, `jszip.min.js`, `tesseract.min.js` y el
+  modelo `eng.traineddata`) a una carpeta `/vendor` del repositorio y actualizar
+  las rutas en `index.html`. Con eso la app funciona sin internet y se elimina
+  la dependencia de los CDN.
 
 ## Limitaciones conocidas
 

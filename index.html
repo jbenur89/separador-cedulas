@@ -6,11 +6,12 @@
 <meta name="robots" content="noindex, nofollow">
 <!-- CSP: bloquea toda conexión de salida excepto la carga de librerías desde cdnjs.
      Aunque el código fuera alterado, no podría enviar datos a ningún servidor. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://cdnjs.cloudflare.com 'unsafe-inline'; worker-src blob: https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://cdnjs.cloudflare.com; font-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net 'unsafe-inline'; worker-src blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; font-src data:; base-uri 'none'; form-action 'none'">
 <title>Separador de Cédulas — Procesamiento local</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <style>
   :root{
     --ink:#17242e; --ink-soft:#51616e; --line:#d8dee3;
@@ -79,6 +80,12 @@
     gap:1rem; flex-wrap:wrap; margin:1.4rem 0 .9rem;
   }
   .toolbar h2{font-size:.95rem; font-weight:650;}
+  .zipgroup{display:flex; gap:.5rem; align-items:center; flex-wrap:wrap;}
+  .zipgroup input{
+    font-family:var(--mono); font-size:.83rem; padding:.48rem .55rem;
+    border:1px solid var(--line); border-radius:5px; color:var(--ink); min-width:200px;
+  }
+  .zipgroup input:focus{outline:2px solid var(--accent); outline-offset:1px;}
   .cards{display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:1rem;}
   .card{
     background:var(--surface); border:1px solid var(--line); border-radius:8px;
@@ -135,7 +142,10 @@
   <section id="results">
     <div class="toolbar">
       <h2 id="resultTitle"></h2>
-      <button class="primary" id="zipBtn">Descargar todo (ZIP)</button>
+      <div class="zipgroup">
+        <input type="text" id="zipName" value="cedulas_separadas" aria-label="Nombre del archivo ZIP">
+        <button class="primary" id="zipBtn">Descargar todo (ZIP)</button>
+      </div>
     </div>
     <div class="cards" id="cardsGrid"></div>
   </section>
@@ -155,7 +165,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 const $ = id => document.getElementById(id);
 const drop = $("drop"), fileInput = $("fileInput"),
       statusBox = $("status"), results = $("results"),
-      cardsGrid = $("cardsGrid"), zipBtn = $("zipBtn"), resultTitle = $("resultTitle");
+      cardsGrid = $("cardsGrid"), zipBtn = $("zipBtn"), resultTitle = $("resultTitle"),
+      zipNameInput = $("zipName");
 
 let generated = []; // {name, bytes}
 
@@ -243,11 +254,51 @@ async function handleFile(file){
     }
     prog.value = 80;
 
-    // 3. Componer un PDF por cédula (frontal arriba, posterior abajo, centradas)
+    // 3. OCR local del MRZ para nombrar cada archivo: Cedula_Apellido_Nombre
+    const ocrMsg = document.createElement("div");
+    ocrMsg.className = "msg";
+    statusBox.appendChild(ocrMsg);
+    const names = [];
+    let ocrFallos = 0, ocrDisponible = true;
+    for (let u = 0; u < units.length; u++){
+      ocrMsg.textContent = "Leyendo nombres con OCR local: " + (u + 1) + " de " + units.length + "…";
+      let nombre = null;
+      if (ocrDisponible){
+        try {
+          nombre = await ocrBackForName(units[u].back);
+        } catch (e){
+          console.warn("OCR no disponible:", e);
+          ocrDisponible = false; // no reintentar si el módulo no cargó
+        }
+      }
+      if (nombre){
+        names.push("Cédula_" + nombre.surname + "_" + nombre.given);
+      } else {
+        names.push("cedula_" + String(u + 1).padStart(2, "0"));
+        ocrFallos++;
+      }
+      prog.value = 80 + Math.round(12 * (u + 1) / units.length);
+    }
+    // Resolver nombres duplicados agregando sufijo _2, _3…
+    const usados = {};
+    for (let u = 0; u < names.length; u++){
+      const base = names[u];
+      if (usados[base]){
+        usados[base]++;
+        names[u] = base + "_" + usados[base];
+      } else usados[base] = 1;
+    }
+    ocrMsg.textContent = ocrFallos === 0
+      ? "Nombres leídos correctamente desde el MRZ de las " + units.length + " cédulas."
+      : "Nombres leídos: " + (units.length - ocrFallos) + " de " + units.length +
+        ". Los restantes usan nombre genérico — puedes editarlos abajo.";
+    ocrMsg.className = "msg " + (ocrFallos === 0 ? "ok" : "warn");
+
+    // 4. Componer un PDF por cédula (frontal arriba, posterior abajo, centradas)
     for (let u = 0; u < units.length; u++){
       const bytes = await composePdf(units[u].front, units[u].back);
-      generated.push({ name: "cedula_" + String(u + 1).padStart(2, "0"), bytes });
-      prog.value = 80 + Math.round(18 * (u + 1) / units.length);
+      generated.push({ name: names[u], bytes });
+      prog.value = 92 + Math.round(6 * (u + 1) / units.length);
     }
 
     prog.value = 100;
@@ -472,6 +523,57 @@ function cropToJpeg(canvas, box){
   return url;
 }
 
+/* ---------- OCR local de la zona MRZ (Tesseract.js) ----------
+   Lee la línea 3 del MRZ del reverso: APELLIDO1<APELLIDO2<<NOMBRE1<NOMBRE2
+   Todo ocurre en el navegador; solo se descarga (una vez) el modelo de idioma. */
+let ocrWorker = null;
+
+async function getOcrWorker(){
+  if (ocrWorker) return ocrWorker;
+  if (typeof Tesseract === "undefined") throw new Error("Tesseract no disponible");
+  ocrWorker = await Tesseract.createWorker("eng", 1, {
+    workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
+    corePath:   "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1",
+    langPath:   "https://tessdata.projectnaptha.com/4.0.0"
+  });
+  await ocrWorker.setParameters({
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
+    tessedit_pageseg_mode: "6"
+  });
+  return ocrWorker;
+}
+
+function parseNameFromMrz(text){
+  const lines = text.toUpperCase().split(/\n+/)
+    .map(l => l.replace(/[^A-Z0-9<]/g, ""))
+    .filter(l => l.length >= 10);
+  let best = null;
+  for (const l of lines){
+    if (l.includes("<<") && /^[A-Z<]+$/.test(l) && l.replace(/</g, "").length >= 6) best = l;
+  }
+  if (!best) return null;
+  const parts = best.split("<<");
+  const surname = (parts[0] || "").split("<").filter(Boolean)[0];
+  const given   = (parts[1] || "").split("<").filter(Boolean)[0];
+  if (!surname || !given) return null;
+  const t = s => s.charAt(0) + s.slice(1).toLowerCase();
+  return { surname: t(surname), given: t(given) };
+}
+
+async function ocrBackForName(backDataUrl){
+  // Recortar la mitad inferior del reverso (donde vive el MRZ) para acelerar
+  const img = new Image();
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = backDataUrl; });
+  const cv = document.createElement("canvas");
+  const yStart = Math.floor(img.height * 0.45);
+  cv.width = img.width; cv.height = img.height - yStart;
+  cv.getContext("2d").drawImage(img, 0, yStart, img.width, cv.height, 0, 0, img.width, cv.height);
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(cv);
+  cv.width = cv.height = 0;
+  return parseNameFromMrz(data.text || "");
+}
+
 /* ---------- Composición del PDF de salida ---------- */
 async function composePdf(frontUrl, backUrl){
   const doc = await PDFLib.PDFDocument.create();
@@ -529,7 +631,8 @@ zipBtn.addEventListener("click", async () => {
     const zip = new JSZip();
     generated.forEach(g => zip.file(sanitizeName(g.name) + ".pdf", g.bytes));
     const blob = await zip.generateAsync({ type: "blob" });
-    downloadBlob(blob, "cedulas_separadas.zip");
+    const zn = sanitizeName(zipNameInput.value) || "cedulas_separadas";
+    downloadBlob(blob, zn + ".zip");
   } finally {
     zipBtn.disabled = false;
   }
