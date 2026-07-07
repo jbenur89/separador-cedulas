@@ -262,34 +262,35 @@ async function handleFile(file){
   }
 }
 
-/* ---------- Detección de tarjetas ----------
-   Estrategia: reducir la página, marcar celdas con contenido (no blancas),
-   agrupar por componentes conexas, fusionar cajas cercanas y filtrar por
-   tamaño y proporción de tarjeta ID-1 (~1.586 : 1). */
+/* ---------- Detección de tarjetas (adaptativa) ----------
+   Funciona con 1 a N cédulas por página en cualquier disposición.
+   No usa umbrales de tamaño absoluto: calcula el área mínima
+   como fracción del área real de la página. */
 function detectCards(canvas){
-  const SMALL_W = 320, CELL = 4;
-  const ratio = SMALL_W / canvas.width;
-  const smallH = Math.max(1, Math.round(canvas.height * ratio));
-  const sc = document.createElement("canvas");
-  sc.width = SMALL_W; sc.height = smallH;
-  const sctx = sc.getContext("2d", { willReadFrequently: true });
-  sctx.drawImage(canvas, 0, 0, SMALL_W, smallH);
-  const d = sctx.getImageData(0, 0, SMALL_W, smallH).data;
+  const WORK_W = 600, CELL = 3;
+  const ratio = WORK_W / canvas.width;
+  const WORK_H = Math.max(1, Math.round(canvas.height * ratio));
 
-  const gw = Math.ceil(SMALL_W / CELL), gh = Math.ceil(smallH / CELL);
+  const sc = document.createElement("canvas");
+  sc.width = WORK_W; sc.height = WORK_H;
+  const sctx = sc.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(canvas, 0, 0, WORK_W, WORK_H);
+  const d = sctx.getImageData(0, 0, WORK_W, WORK_H).data;
+  sc.width = sc.height = 0;
+
+  // Grilla: marcar celda como "contenido" si promedio RGB < 220
+  const gw = Math.ceil(WORK_W / CELL), gh = Math.ceil(WORK_H / CELL);
   const grid = new Uint8Array(gw * gh);
-  for (let y = 0; y < smallH; y++){
-    const row = y * SMALL_W;
-    for (let x = 0; x < SMALL_W; x++){
-      const i = (row + x) * 4;
-      // "contenido" = píxel que se aleja del blanco del papel
-      if (!(d[i] > 228 && d[i+1] > 228 && d[i+2] > 228)){
+  for (let y = 0; y < WORK_H; y++){
+    for (let x = 0; x < WORK_W; x++){
+      const i = (y * WORK_W + x) * 4;
+      if ((d[i] + d[i+1] + d[i+2]) / 3 < 220){
         grid[((y / CELL) | 0) * gw + ((x / CELL) | 0)] = 1;
       }
     }
   }
 
-  // Componentes conexas (8 vecinos) sobre la grilla de celdas
+  // Componentes conexas (8 vecinos)
   const seen = new Uint8Array(gw * gh);
   let comps = [];
   for (let cy = 0; cy < gh; cy++){
@@ -312,12 +313,12 @@ function detectCards(canvas){
           }
         }
       }
-      if (count >= 3) comps.push({ minX, minY, maxX, maxY }); // descartar polvo del escaneo
+      if (count >= 8) comps.push({ minX, minY, maxX, maxY });
     }
   }
 
-  // Fusionar cajas cercanas (partes de una misma tarjeta con fondo claro)
-  const GAP = 4; // celdas ≈ 16 px en escala reducida
+  // Fusionar cajas cercanas — GAP adaptativo al 3% del ancho
+  const GAP = Math.max(3, Math.round(gw * 0.03));
   let merged = true;
   while (merged){
     merged = false;
@@ -335,35 +336,36 @@ function detectCards(canvas){
     }
   }
 
-  // Filtrar por tamaño y proporción de tarjeta
+  // Filtro adaptativo: mínimo 1% del área de la página, proporción entre 0.8 y 4.0
+  const pageArea = gw * gh;
   const boxes = [];
   for (const c of comps){
-    const w = (c.maxX - c.minX + 1) * CELL, h = (c.maxY - c.minY + 1) * CELL;
-    const aspect = w / h;
-    if (w < 0.18 * SMALL_W) continue;                 // demasiado pequeña
-    if (w * h < 0.015 * SMALL_W * smallH) continue;   // área insignificante
-    if (aspect < 1.05 || aspect > 2.6) continue;      // no tiene forma de tarjeta
-    boxes.push({ x: c.minX * CELL, y: c.minY * CELL, w, h });
+    const cw = c.maxX - c.minX + 1, ch = c.maxY - c.minY + 1;
+    if (cw * ch < pageArea * 0.01) continue;
+    if (cw < 5 || ch < 5) continue;
+    const aspect = cw / ch;
+    if (aspect < 0.8 || aspect > 4.0) continue;
+    boxes.push({ x: c.minX * CELL, y: c.minY * CELL, w: cw * CELL, h: ch * CELL });
   }
 
-  // Orden de lectura: filas de arriba hacia abajo, dentro de la fila de izquierda a derecha
+  // Ordenar: arriba→abajo, izquierda→derecha dentro de cada fila
   boxes.sort((p, q) => p.y - q.y);
   const rows = [];
   for (const b of boxes){
-    const r = rows.find(row => Math.abs(row[0].y - b.y) < b.h * 0.5);
+    const r = rows.find(row => Math.abs(row[0].y - b.y) < b.h * 0.6);
     if (r) r.push(b); else rows.push([b]);
   }
   const ordered = [];
   for (const r of rows){ r.sort((p, q) => p.x - q.x); ordered.push(...r); }
 
-  // Escalar a resolución completa con un margen del 1.5%
+  // Escalar a resolución completa con margen del 1%
   return ordered.map(b => {
-    const m = b.w * 0.015 / ratio;
+    const mx = b.w * 0.01 / ratio, my = b.h * 0.01 / ratio;
     return {
-      x: Math.max(0, b.x / ratio - m),
-      y: Math.max(0, b.y / ratio - m),
-      w: Math.min(canvas.width,  b.w / ratio + 2 * m),
-      h: Math.min(canvas.height, b.h / ratio + 2 * m)
+      x: Math.max(0, b.x / ratio - mx),
+      y: Math.max(0, b.y / ratio - my),
+      w: Math.min(canvas.width,  b.w / ratio + 2 * mx),
+      h: Math.min(canvas.height, b.h / ratio + 2 * my)
     };
   });
 }
