@@ -114,6 +114,21 @@
     max-width:880px; margin:0 auto; padding:0 1.2rem 2rem;
     font-size:.78rem; color:var(--ink-soft);
   }
+  /* Pestañas */
+  .tabs{display:flex; gap:0; border-bottom:2px solid var(--line); margin-bottom:1.4rem;}
+  .tab{
+    font:inherit; font-size:.88rem; font-weight:600; cursor:pointer;
+    padding:.55rem 1.2rem; border:1px solid transparent; border-bottom:none;
+    border-radius:6px 6px 0 0; background:transparent; color:var(--ink-soft);
+    margin-bottom:-2px;
+  }
+  .tab.active{
+    background:var(--surface); border-color:var(--line); color:var(--accent);
+    border-bottom:2px solid var(--surface);
+  }
+  .tab-panel{display:none;}
+  .tab-panel.active{display:block;}
+
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;} }
 </style>
 </head>
@@ -124,6 +139,11 @@
 </header>
 
 <main>
+  <div class="tabs" role="tablist">
+    <button class="tab active" role="tab" aria-selected="true"  data-tab="batch">Lote (múltiples por hoja)</button>
+    <button class="tab"        role="tab" aria-selected="false" data-tab="single">Individual (una por hoja)</button>
+  </div>
+  <div class="tab-panel active" id="panel-batch">
   <div class="privacy">
     <strong>Privacidad:</strong> este documento se procesa completamente en tu navegador.
     Ningún dato sale de este dispositivo: no hay servidor, no hay almacenamiento, no hay
@@ -149,6 +169,31 @@
     </div>
     <div class="cards" id="cardsGrid"></div>
   </section>
+  </div><!-- /panel-batch -->
+
+  <div class="tab-panel" id="panel-single">
+    <div class="privacy">
+      <strong>Privacidad:</strong> procesamiento 100% local. Ningún dato sale del dispositivo.
+    </div>
+    <div class="drop" id="drop2" role="button" tabindex="0" aria-label="Cargar PDF con cédulas individuales">
+      <span class="c3"></span><span class="c4"></span>
+      <p class="big">Arrastra aquí el PDF con las cédulas individuales, o haz clic para seleccionarlo</p>
+      <p class="small">Formato esperado: una cédula por página — cara frontal arriba, cara posterior abajo.</p>
+      <input type="file" id="fileInput2" accept="application/pdf">
+    </div>
+    <div id="status2"></div>
+    <section id="results2" style="display:none">
+      <div class="toolbar">
+        <h2 id="resultTitle2"></h2>
+        <div class="zipgroup">
+          <input type="text" id="zipName2" value="cedulas_individuales" aria-label="Nombre ZIP">
+          <button class="primary" id="zipBtn2">Descargar todo (ZIP)</button>
+        </div>
+      </div>
+      <div class="cards" id="cardsGrid2"></div>
+    </section>
+  </div><!-- /panel-single -->
+
 </main>
 
 <footer>
@@ -667,6 +712,267 @@ function downloadBlob(data, filename){
 
 function sanitizeName(s){ return s.replace(/[^\w\-\.áéíóúñÁÉÍÓÚÑ ]/g, "").trim(); }
 function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+/* ═══════════════════════════════════════════════════════════
+   PESTAÑA: lógica de navegación entre modos
+   ═══════════════════════════════════════════════════════════ */
+document.querySelectorAll(".tab").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => { t.classList.remove("active"); t.setAttribute("aria-selected","false"); });
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active"); btn.setAttribute("aria-selected","true");
+    document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════
+   MODO INDIVIDUAL: una cédula por página (frontal + posterior)
+   ═══════════════════════════════════════════════════════════ */
+const drop2 = $("drop2"), fileInput2 = $("fileInput2"),
+      statusBox2 = $("status2"), results2 = $("results2"),
+      cardsGrid2 = $("cardsGrid2"), zipBtn2 = $("zipBtn2"),
+      resultTitle2 = $("resultTitle2"), zipNameInput2 = $("zipName2");
+
+let generated2 = [];
+
+drop2.addEventListener("click", () => fileInput2.click());
+drop2.addEventListener("keydown", e => { if (e.key==="Enter"||e.key===" ") fileInput2.click(); });
+["dragover","dragenter"].forEach(ev => drop2.addEventListener(ev, e => { e.preventDefault(); drop2.classList.add("hover"); }));
+["dragleave","drop"].forEach(ev => drop2.addEventListener(ev, e => { e.preventDefault(); drop2.classList.remove("hover"); }));
+drop2.addEventListener("drop", e => { const f=e.dataTransfer.files[0]; if(f) handleFile2(f); });
+fileInput2.addEventListener("change", () => { if(fileInput2.files[0]) handleFile2(fileInput2.files[0]); });
+
+function msg2(text, kind){
+  const d=document.createElement("div"); d.className="msg "+(kind||""); d.innerHTML=text;
+  statusBox2.appendChild(d);
+}
+function clearStatus2(){ statusBox2.innerHTML=""; results2.style.display="none"; cardsGrid2.innerHTML=""; generated2=[]; }
+
+/* Detección de las dos caras dentro de una misma página:
+   Estrategia 1: segmentación por perfil horizontal con gutter progresivo.
+   Estrategia 2 (fallback): valle mínimo suavizado en zona central 35%–65%. */
+function detectTwoFaces(canvas){
+  const DET_W = 800;
+  const ratio = DET_W / canvas.width;
+  const DET_H = Math.max(1, Math.round(canvas.height * ratio));
+
+  const sc = document.createElement("canvas");
+  sc.width = DET_W; sc.height = DET_H;
+  const sctx = sc.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(canvas, 0, 0, DET_W, DET_H);
+  const d = sctx.getImageData(0, 0, DET_W, DET_H).data;
+  sc.width = sc.height = 0;
+
+  const mask = new Uint8Array(DET_W * DET_H);
+  for (let y=0; y<DET_H; y++){
+    for (let x=0; x<DET_W; x++){
+      const i=(y*DET_W+x)*4;
+      const r=d[i],g=d[i+1],b=d[i+2];
+      if((r+g+b)/3 < 245 || Math.max(r,g,b)-Math.min(r,g,b) > 12) mask[y*DET_W+x]=1;
+    }
+  }
+
+  // Perfil horizontal
+  const prof = new Int32Array(DET_H);
+  for (let y=0; y<DET_H; y++){
+    let s=0; for (let x=0; x<DET_W; x++) s+=mask[y*DET_W+x]; prof[y]=s;
+  }
+  const emptyTol = Math.max(2, DET_W*0.005);
+
+  function segments(profile, tol, minG, minS){
+    const n=profile.length, segs=[]; let start=null, i=0;
+    while(i<n){
+      if(profile[i]>tol){ if(start===null) start=i; i++; }
+      else { let j=i; while(j<n&&profile[j]<=tol) j++;
+        if(start!==null&&((j-i)>=minG||j===n)){ segs.push([start,i]); start=null; } i=j; }
+    }
+    if(start!==null) segs.push([start,n]);
+    return segs.filter(s=>(s[1]-s[0])>=minS);
+  }
+
+  // Perfil de columnas dentro de una banda
+  function colSegs(y0, y1){
+    const cp = new Int32Array(DET_W);
+    for (let x=0; x<DET_W; x++){ let s=0; for(let y=y0;y<y1;y++) s+=mask[y*DET_W+x]; cp[x]=s; }
+    return segments(cp, Math.max(2,(y1-y0)*0.005), Math.max(4,Math.round(DET_W*0.010)), Math.round(DET_W*0.05));
+  }
+
+  // Ajustar caja al contenido real con margen
+  function tightBox(y0, y1, x0, x1){
+    let by0=-1,by1=-1,bx0=DET_W,bx1=-1;
+    for(let y=y0;y<y1;y++){ const base=y*DET_W;
+      for(let x=x0;x<x1;x++){ if(mask[base+x]){
+        if(by0===-1) by0=y; by1=y; if(x<bx0) bx0=x; if(x>bx1) bx1=x; }}}
+    if(by0===-1) return null;
+    const bw=bx1-bx0+1, bh=by1-by0+1;
+    const mx=bw*0.01/ratio, my=bh*0.01/ratio;
+    return { x:Math.max(0,(bx0/ratio)-mx), y:Math.max(0,(by0/ratio)-my),
+             w:Math.min(canvas.width,(bw/ratio)+2*mx), h:Math.min(canvas.height,(bh/ratio)+2*my) };
+  }
+
+  function bandToBox(y0, y1){
+    const cols = colSegs(y0, y1);
+    const x0 = cols.length ? cols[0][0] : 0;
+    const x1 = cols.length ? cols[cols.length-1][1] : DET_W;
+    return tightBox(y0, y1, x0, x1);
+  }
+
+  // Estrategia 1: gutter progresivo
+  let bands = null;
+  for (const minG of [Math.max(4,Math.round(DET_H*0.008)), 5, 3, 2]){
+    const segs = segments(prof, emptyTol, minG, Math.round(DET_H*0.03));
+    if(segs.length===2){ bands=segs; break; }
+  }
+
+  // Estrategia 2: valle mínimo suavizado en zona central 35%–65%
+  if(!bands){
+    const WIN=15, smoothed=new Float32Array(DET_H);
+    for(let y=0;y<DET_H;y++){
+      let s=0,cnt=0;
+      for(let k=Math.max(0,y-WIN);k<=Math.min(DET_H-1,y+WIN);k++){s+=prof[k];cnt++;}
+      smoothed[y]=s/cnt;
+    }
+    const z0=Math.floor(DET_H*0.35), z1=Math.floor(DET_H*0.65);
+    let minVal=Infinity, split=Math.floor(DET_H/2);
+    for(let y=z0;y<z1;y++){ if(smoothed[y]<minVal){minVal=smoothed[y]; split=y;} }
+    let lo=split, hi=split;
+    while(lo>0 && smoothed[lo]<=minVal*2.5) lo--;
+    while(hi<DET_H-1 && smoothed[hi]<=minVal*2.5) hi++;
+    bands=[[0, lo+1],[hi, DET_H]];
+  }
+
+  const box0 = bandToBox(bands[0][0], bands[0][1]);
+  const box1 = bandToBox(bands[1][0], bands[1][1]);
+  return (box0 && box1) ? [box0, box1] : null;
+}
+
+async function handleFile2(file){
+  clearStatus2();
+  if(!file.name.toLowerCase().endsWith(".pdf") && file.type!=="application/pdf"){
+    msg2("El archivo debe ser un PDF.", "err"); return;
+  }
+  const prog=document.createElement("progress");
+  prog.max=100; prog.value=5;
+  msg2("Procesando <code>"+escapeHtml(file.name)+"</code> localmente…");
+  statusBox2.appendChild(prog);
+
+  try {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+    const n = pdf.numPages;
+    if(n<1){ msg2("El PDF está vacío.","err"); return; }
+
+    // Renderizar cada página y detectar las dos caras
+    const units=[];
+    for(let i=1;i<=n;i++){
+      const page=await pdf.getPage(i);
+      const base=page.getViewport({scale:1});
+      const scale=1500/base.width;
+      const vp=page.getViewport({scale});
+      const cv=document.createElement("canvas");
+      cv.width=Math.round(vp.width); cv.height=Math.round(vp.height);
+      await page.render({canvasContext:cv.getContext("2d",{willReadFrequently:true}),viewport:vp}).promise;
+      const faces=detectTwoFaces(cv);
+      if(faces){
+        const frontJpeg=cropToJpeg(cv, faces[0]);
+        const backJpeg=cropToJpeg(cv, faces[1]);
+        units.push({front:frontJpeg, back:backJpeg, pageNum:i});
+      } else {
+        console.warn("Página "+i+": no se detectaron dos caras");
+      }
+      cv.width=cv.height=0;
+      prog.value=5+Math.round(55*i/n);
+    }
+
+    prog.value=60;
+    if(units.length===0){ msg2("No se detectaron cédulas. Verifica que cada página tenga frontal arriba y posterior abajo.","err"); return; }
+
+    // OCR para nombres
+    const ocrMsg2=document.createElement("div"); ocrMsg2.className="msg"; statusBox2.appendChild(ocrMsg2);
+    const names2=[], usados2={};
+    let ocrDis2=true;
+    for(let u=0;u<units.length;u++){
+      ocrMsg2.textContent="Leyendo nombres con OCR local: "+(u+1)+" de "+units.length+"…";
+      let nombre=null;
+      if(ocrDis2){ try{ nombre=await ocrBackForName(units[u].back); }
+        catch(e){ ocrDis2=false; try{if(ocrWorker)ocrWorker.terminate();}catch(_){} ocrWorker=null; } }
+      const base2="Cédula_"+(nombre?nombre.surname+"_"+nombre.given:("cedula_"+String(u+1).padStart(2,"0")));
+      if(!nombre) usados2[base2]=(usados2[base2]||0);
+      names2.push(base2);
+      prog.value=60+Math.round(30*(u+1)/units.length);
+    }
+    // Resolver duplicados
+    const cnt2={};
+    for(let u=0;u<names2.length;u++){
+      const b=names2[u]; cnt2[b]=(cnt2[b]||0)+1;
+      if(cnt2[b]>1) names2[u]=b+"_"+cnt2[b];
+    }
+    ocrMsg2.textContent=ocrDis2
+      ?"Nombres leídos desde el MRZ de las "+units.length+" cédulas."
+      :"El módulo OCR no pudo ejecutarse. Los archivos usan nombres genéricos; edítalos abajo.";
+    ocrMsg2.className="msg "+(ocrDis2?"ok":"warn");
+
+    // Componer PDFs
+    for(let u=0;u<units.length;u++){
+      const bytes=await composePdf(units[u].front,units[u].back);
+      generated2.push({name:names2[u],bytes});
+      prog.value=90+Math.round(8*(u+1)/units.length);
+    }
+    prog.value=100;
+    msg2("Listo: "+units.length+" cédula(s) procesada(s).","ok");
+    renderResults2(units);
+  } catch(err){
+    console.error(err); msg2("Error: "+escapeHtml(err.message||String(err)),"err");
+  } finally { fileInput2.value=""; }
+}
+
+zipBtn2.addEventListener("click", async () => {
+  if(!generated2.length) return;
+  zipBtn2.disabled=true;
+  try{
+    const zip=new JSZip();
+    generated2.forEach(g=>zip.file(sanitizeName(g.name)+".pdf",g.bytes));
+    const blob=await zip.generateAsync({type:"blob"});
+    const zn=sanitizeName(zipNameInput2.value)||"cedulas_individuales";
+    downloadBlob(blob,zn+".zip");
+  } finally { zipBtn2.disabled=false; }
+});
+
+function renderResults2(units){
+  results2.style.display="block";
+  resultTitle2.textContent="Resultados ("+generated2.length+")";
+  cardsGrid2.innerHTML="";
+  generated2.forEach((g,i)=>{
+    const card=document.createElement("div"); card.className="card";
+    const thumbs=document.createElement("div"); thumbs.className="thumbs";
+    const imF=document.createElement("img"); imF.src=units[i].front; imF.alt="Frontal "+(i+1);
+    const imB=document.createElement("img"); imB.src=units[i].back;  imB.alt="Posterior "+(i+1);
+    thumbs.append(imF,imB);
+    const lab=document.createElement("label"); lab.textContent="Nombre del archivo";
+    const inp=document.createElement("input"); inp.type="text"; inp.value=g.name;
+    inp.addEventListener("input",()=>{ g.name=sanitizeName(inp.value)||("cedula_"+(i+1)); });
+    const btn=document.createElement("button"); btn.textContent="Descargar PDF";
+    btn.addEventListener("click",()=>downloadBlob(g.bytes,g.name+".pdf"));
+    card.append(thumbs,lab,inp,btn);
+    cardsGrid2.appendChild(card);
+  });
+}
+/* ---------- Navegación entre pestañas ---------- */
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(b => {
+    const active = b.dataset.tab === name;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', active);
+  });
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    p.classList.toggle('active', p.id === 'panel-' + name);
+  });
+}
+document.querySelectorAll('.tab').forEach(b => {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+});
+
+
 </script>
 </body>
 </html>
